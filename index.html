@@ -2997,6 +2997,7 @@ footer .ft-links a:hover{opacity:1}
             </label>
           </div>
           <!-- Preview enriquecida de la importación -->
+           <div id="sbImportStatus"></div>
           <div id="importPreview" style="display:none">
             <div class="import-preview-hd">
               <div class="ip-title">
@@ -8424,10 +8425,194 @@ function cancelarImport(){
  * confirmarImport() — Procesa y aplica las filas al catálogo PRODS
  * Respeta el modo: merge (actualizar+añadir) o replace (reemplazar).
  */
-function confirmarImport(){
+async function confirmarImport(){
   const rows = window._importRows;
   if(!rows||!rows.length){showToast('⚠️ No hay datos para importar');return;}
   const mode = document.querySelector('input[name="importMode"]:checked')?.value||'merge';
+
+  /* Spinner en el botón */
+  const btnConfirm = document.querySelector('#importPreview .btn-save');
+  const btnOrig = btnConfirm ? btnConfirm.innerHTML : '';
+  if(btnConfirm){ btnConfirm.disabled=true; btnConfirm.innerHTML='<i class="fas fa-spinner fa-spin"></i> Importando…'; }
+
+  /* Categorías válidas y alias comunes */
+  const CAT_VALID = ['botica','abarrotes','bebidas','dulces','aseo','limpieza','ferreteria','libreria'];
+  const CAT_MAP   = {
+    farmacia:'botica', bodega:'abarrotes', bazar:'libreria',
+    ferretería:'ferreteria', abarrote:'abarrotes', snacks:'dulces',
+    limpieza_hogar:'limpieza', higiene:'aseo'
+  };
+
+  const mapRow = r => {
+    const rawCat = (r.categoria||r.category||r.cat||r.c||'').toLowerCase().trim();
+    const cat    = CAT_VALID.includes(rawCat) ? rawCat : (CAT_MAP[rawCat]||'abarrotes');
+
+    /* ── FIX CRÍTICO: columna "activo" ──────────────────────────────
+       Tu plantilla tiene activo = valor del stock (200, 300, etc.)
+       en vez de 1/0. Esta lógica lo corrige automáticamente:
+       - Si activo es un número > 1  → asumimos que es el stock, forzamos activo=true
+       - Si activo es 0 o "0" o false → inactivo
+       - Si activo es 1, "1", true    → activo
+       - Si activo está vacío         → activo por defecto
+    ──────────────────────────────────────────────────────────────── */
+    const activoRaw = r.activo;
+    let activo;
+    if(activoRaw===undefined || activoRaw==='' || activoRaw===null){
+      activo = true; // sin valor → activo por defecto
+    } else {
+      const n = parseFloat(activoRaw);
+      if(!isNaN(n) && n > 1){
+        activo = true; // era el stock pegado en columna activo → corregir
+      } else {
+        activo = activoRaw===1||activoRaw==='1'||activoRaw===true||activoRaw==='true';
+      }
+    }
+
+    return {
+      n:      (r.nombre||r.name||r.n||'').trim(),
+      c:      cat,
+      seg:    (r.segmento||r.seg||'').trim().toUpperCase(),
+      p:      Math.round(parseFloat(r.precio||r.price||r.p||0)*100)/100,
+      pc:     Math.round(parseFloat(r.precio_compra||r.costo||r.pc||0)*100)/100,
+      s:      Math.max(0, parseInt(r.stock||r.s||0)||0),
+      desc:   (r.descripcion||r.description||r.desc||'').trim(),
+      e:      (r.emoji||r.e||'📦').trim()||'📦',
+      img:    (r.imagen||r.image||r.img||'').trim(),
+      activo: activo,
+    };
+  };
+
+  const mapped = rows.map(mapRow).filter(r => r.n && r.p >= 0);
+  let added=0, updated=0, skipped=rows.length-mapped.length;
+
+  /* ── Aplicar al catálogo local ── */
+  if(mode==='replace'){
+    PRODS  = mapped.map((r,i) => ({...r, id: i+1}));
+    nextId = PRODS.length + 1;
+    added  = PRODS.length;
+  } else {
+    mapped.forEach(r => {
+      const existing = PRODS.find(p => p.n.toLowerCase()===r.n.toLowerCase());
+      if(existing){
+        existing.p      = r.p;
+        existing.s      = r.s;
+        existing.activo = r.activo;
+        if(r.desc) existing.desc = r.desc;
+        if(r.seg)  existing.seg  = r.seg;
+        if(r.pc)   existing.pc   = r.pc;
+        updated++;
+      } else {
+        PRODS.push({...r, id: nextId++});
+        added++;
+      }
+    });
+  }
+
+  saveAll(); /* localStorage inmediato */
+
+  /* ── Sincronizar con Supabase ── */
+  let sbStatusHtml = '';
+
+  if(SB_ON()){
+    try {
+      if(btnConfirm) btnConfirm.innerHTML='<i class="fas fa-cloud-upload-alt fa-spin"></i> Subiendo a Supabase…';
+
+      const sbRows = PRODS.map(p => ({
+        id:          p.id,
+        nombre:      p.n,
+        categoria:   p.c,
+        segmento:    p.seg||'',
+        precio:      p.p,
+        stock:       p.s,
+        emoji:       p.e||'📦',
+        imagen:      p.img||'',
+        descripcion: p.desc||'',
+        activo:      p.activo!==false,
+        updated_at:  new Date().toISOString(),
+      }));
+
+      /* Si es reemplazo total, borrar toda la tabla primero */
+      if(mode==='replace'){
+        await getSB().from('inventario').delete().gte('id', 0);
+      }
+
+      /* Subir en lotes de 200 (límite seguro de Supabase) */
+      const BATCH = 200;
+      let loteActual = 0;
+      for(let i=0; i<sbRows.length; i+=BATCH){
+        loteActual++;
+        const totalLotes = Math.ceil(sbRows.length/BATCH);
+        if(btnConfirm) btnConfirm.innerHTML=
+          `<i class="fas fa-cloud-upload-alt fa-spin"></i> Subiendo lote ${loteActual}/${totalLotes}…`;
+
+        const { error } = await getSB()
+          .from('inventario')
+          .upsert(sbRows.slice(i, i+BATCH), { onConflict: 'id' });
+        if(error) throw error;
+      }
+
+      showToast(`✅ ${added} añadidos · ${updated} actualizados · ☁️ Supabase sincronizado`);
+      sbStatusHtml = `
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;
+          padding:12px 16px;margin-top:14px;display:flex;align-items:center;gap:10px;
+          font-size:.8rem;color:#14532d">
+          <i class="fas fa-cloud-upload-alt" style="font-size:1.2rem;color:#16a34a"></i>
+          <div>
+            <strong>Supabase actualizado</strong><br>
+            <span style="color:#166534">${PRODS.filter(p=>p.activo!==false).length} productos activos · 
+            visibles en todos los dispositivos al instante</span>
+          </div>
+        </div>`;
+
+    } catch(err){
+      console.error('[Supabase import]', err);
+      showToast(`⚠️ Local OK · Error Supabase: ${err.message||'ver consola'}`);
+      sbStatusHtml = `
+        <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;
+          padding:12px 16px;margin-top:14px;display:flex;align-items:center;gap:10px;
+          font-size:.8rem;color:#dc2626">
+          <i class="fas fa-exclamation-triangle" style="font-size:1.2rem"></i>
+          <div>
+            <strong>Guardado local ✓</strong> — pero falló Supabase<br>
+            <span style="color:#b91c1c">Error: ${err.message||'ver consola del navegador'}</span>
+          </div>
+        </div>`;
+    }
+  } else {
+    /* Supabase no configurado */
+    showToast(`✅ ${added} añadidos · ${updated} actualizados · (sin sincronización cloud)`);
+    sbStatusHtml = `
+      <div style="background:#fefce8;border:1px solid #fde047;border-radius:10px;
+        padding:12px 16px;margin-top:14px;display:flex;align-items:center;gap:10px;
+        font-size:.8rem;color:#854d0e">
+        <i class="fas fa-info-circle" style="font-size:1.2rem;color:#ca8a04"></i>
+        <div>
+          <strong>Solo guardado en este navegador</strong><br>
+          Para sync automático en todos los dispositivos, 
+          configura <code>SUPABASE_URL</code> y <code>SUPABASE_ANON_KEY</code> en el código.
+        </div>
+      </div>`;
+  }
+
+  /* Restaurar botón */
+  if(btnConfirm){ btnConfirm.disabled=false; btnConfirm.innerHTML=btnOrig; }
+
+  /* Mostrar status de Supabase */
+  const sbStatus = document.getElementById('sbImportStatus');
+  if(sbStatus) sbStatus.innerHTML = sbStatusHtml;
+
+  /* Limpiar UI de importación */
+  document.getElementById('importPreview').style.display='none';
+  const badge=document.getElementById('dzFileBadge');if(badge)badge.style.display='none';
+  const inp=document.getElementById('excelFile');if(inp)inp.value='';
+  window._importRows=null;
+
+  /* Refrescar vistas */
+  renderAdmProds();
+  renderDashboard();
+  if(typeof renderTicker==='function') renderTicker();
+  if(typeof renderProds==='function')  renderProds();
+};
 
   // Mapeo de columnas flexible
   const mapRow = r=>({
