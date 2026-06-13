@@ -8466,9 +8466,7 @@ async function confirmarImport(){
       } else {
         activo = activoRaw===1||activoRaw==='1'||activoRaw===true||activoRaw==='true';
       }
-    }
-
-    return {
+       return {
       n:      (r.nombre||r.name||r.n||'').trim(),
       c:      cat,
       seg:    (r.segmento||r.seg||'').trim().toUpperCase(),
