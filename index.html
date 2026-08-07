@@ -40,10 +40,107 @@ async function loadProducts(){
     renderProducts(products);
     updateHeroStats();
     updateCatCounts();
+    initRealtime();
   }catch(e){
     console.error('Supabase error:',e);
     showToast('⚠️ Error de conexión — recarga la página');
   }
+}
+
+/* ════════════════════════════════════════════
+   REALTIME SUBSCRIPTION
+   ════════════════════════════════════════════ */
+let _rtChannel;
+function initRealtime(){
+  if(_rtChannel) db.removeChannel(_rtChannel);
+  _rtChannel = db.channel('losrenacos-realtime')
+    .on('postgres_changes',{event:'*',schema:'public',table:'inventario'},payload=>{
+      const t=payload.eventType;
+      if(t==='INSERT'){
+        const np=mapRow(payload.new);
+        if(!products.find(p=>p.id===np.id)){products.push(np);adminProducts.push(np);}
+      } else if(t==='UPDATE'){
+        const u=mapRow(payload.new);
+        const pi=products.findIndex(p=>p.id===u.id);
+        const ai=adminProducts.findIndex(p=>p.id===u.id);
+        if(pi!==-1) products[pi]=u;
+        if(ai!==-1) adminProducts[ai]=u;
+      } else if(t==='DELETE'){
+        const id=payload.old.id;
+        products=products.filter(p=>p.id!==id);
+        adminProducts=adminProducts.filter(p=>p.id!==id);
+      }
+      renderProducts(products);
+      updateCatCounts();
+      setRtStatus('SUBSCRIBED');
+    })
+    .subscribe(status=>{
+      setRtStatus(status);
+    });
+}
+function setRtStatus(s){
+  const dot=document.getElementById('rt-dot');
+  const lbl=document.getElementById('rt-label');
+  if(!dot||!lbl) return;
+  if(s==='SUBSCRIBED'){dot.style.background='#4CAF74';lbl.textContent='Tiempo Real ●';}
+  else if(s==='CHANNEL_ERROR'||s==='CLOSED'){dot.style.background='#EF5350';lbl.textContent='Sin conexión';}
+  else{dot.style.background='#F5A800';lbl.textContent='Conectando…';}
+}
+
+/* ════════════════════════════════════════════
+   PENDING CHANGES QUEUE
+   ════════════════════════════════════════════ */
+let pendingChanges={};
+function queueChange(id,field,val){
+  if(!pendingChanges[id]) pendingChanges[id]={};
+  pendingChanges[id][field]=val;
+  updatePendingBadge();
+  renderPendingBar();
+}
+function updatePendingBadge(){
+  const n=Object.keys(pendingChanges).length;
+  const el=document.getElementById('pending-badge');
+  if(el) el.textContent=n>0?` (${n} pend.)`:'';
+}
+function renderPendingBar(){
+  const bar=document.getElementById('pending-bar');
+  if(!bar) return;
+  const n=Object.keys(pendingChanges).length;
+  bar.style.display=n>0?'flex':'none';
+  const cnt=document.getElementById('pending-count');
+  if(cnt) cnt.textContent=n+' cambio'+(n!==1?'s':'')+' pendiente'+(n!==1?'s':'');
+}
+async function saveAllChanges(){
+  const n=Object.keys(pendingChanges).length;
+  if(n===0){showToast('Sin cambios pendientes');return;}
+  const btn=document.getElementById('save-all-btn');
+  if(btn){btn.disabled=true;btn.textContent='⏳ Guardando...';}
+  const errors=[];
+  for(const [id,changes] of Object.entries(pendingChanges)){
+    const FM={price:'precio',stock:'stock',name:'nombre',cat:'categoria',subc:'segmento',icon:'emoji',qty:'descripcion',oferta:'oferta'};
+    const dbObj={updated_at:new Date().toISOString()};
+    for(const [f,v] of Object.entries(changes)){if(FM[f]) dbObj[FM[f]]=v;}
+    const{error}=await db.from('inventario').update(dbObj).eq('id',parseInt(id));
+    if(error) errors.push(id+': '+error.message);
+  }
+  if(errors.length===0){
+    await db.from('cambios_log').insert({tabla:'inventario',operacion:'BATCH_SAVE',datos:{cambios:n,ids:Object.keys(pendingChanges)}});
+    pendingChanges={};
+    showToast('✅ '+n+' cambio'+(n!==1?'s':'')+' guardado'+(n!==1?'s':'')+' en BD');
+    if(btn){btn.disabled=false;btn.textContent='💾 Guardar cambios';}
+    renderPendingBar();
+    updatePendingBadge();
+  } else {
+    showToast('❌ Errores: '+errors.join(' | '));
+    if(btn){btn.disabled=false;btn.textContent='💾 Reintentar';}
+  }
+}
+function discardAllChanges(){
+  if(!confirm('¿Descartar '+Object.keys(pendingChanges).length+' cambio(s) pendiente(s)?')) return;
+  pendingChanges={};
+  renderPendingBar();
+  updatePendingBadge();
+  showSection('products');
 }
 
 function updateCatCounts(){
@@ -805,8 +902,13 @@ footer::before { content:''; position:absolute; top:0; left:0; right:0; height:2
         <div class="side-link" onclick="showSection('orders')"><span class="sl-i">📦</span> Pedidos</div>
         <div class="side-label">Inventario</div>
         <div class="side-link" onclick="showSection('products')"><span class="sl-i">🏷️</span> Productos</div>
+        <div class="side-link" onclick="showSection('categorias')"><span class="sl-i">🗂️</span> Categorías</div>
         <div class="side-link" onclick="showSection('stock')"><span class="sl-i">📉</span> Alertas de Stock</div>
         <div class="side-link" onclick="showSection('excel')"><span class="sl-i">📊</span> Carga por Excel</div>
+        <div id="rt-status" style="margin:8px 14px 0;padding:5px 10px;border-radius:20px;font-size:10px;font-weight:700;font-family:Outfit,sans-serif;background:rgba(255,255,255,.07);color:var(--cream-m);display:flex;align-items:center;gap:6px">
+          <span id="rt-dot" style="width:7px;height:7px;border-radius:50%;background:#555;display:inline-block"></span>
+          <span id="rt-label">Conectando…</span>
+        </div>
         <div class="side-label">Reportes</div>
         <div class="side-link" onclick="showSection('ventas')"><span class="sl-i">💰</span> Ventas & Reportes</div>
         <div class="side-link" onclick="showSection('pagos')"><span class="sl-i">💳</span> Verificar Pagos</div>
@@ -1256,13 +1358,173 @@ function updateSubcOptions(){
   if(!sel) return;
   sel.innerHTML=subcs.map(s=>`<option value="${s}">${s}</option>`).join('');
 }
+
+/* ════════════════════════════════════════════
+   GESTIÓN DE CATEGORÍAS Y SUBCATEGORÍAS
+   ════════════════════════════════════════════ */
+let catsTree=[];
+
+async function loadCategoriasTree(){
+  const{data,error}=await db.from('categorias').select('*').eq('activo',true).order('padre_id',{nullsFirst:true}).order('nombre');
+  if(error){document.getElementById('cat-tree').innerHTML='<p style="color:var(--red)">Error cargando categorías</p>';return;}
+  catsTree=data||[];
+  renderCatTree();
+}
+
+function renderCatTree(){
+  const container=document.getElementById('cat-tree');
+  if(!container) return;
+  const roots=catsTree.filter(c=>!c.padre_id);
+  container.innerHTML=roots.map(root=>{
+    const children=catsTree.filter(c=>c.padre_id===root.id);
+    return `<div style="border:1px solid var(--glassBd);border-radius:10px;padding:12px 14px;margin-bottom:10px;background:rgba(255,255,255,.03)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:${children.length?'10px':'0'}">
+        <span style="font-size:20px">${root.emoji}</span>
+        <div style="flex:1">
+          <div style="font-weight:800;font-size:14px;color:var(--cream)">${root.nombre}</div>
+          <div style="font-size:10px;color:var(--cream-m)">${children.length} subcategorías</div>
+        </div>
+        <button class="abtn gold" style="font-size:10px;padding:4px 10px" onclick="openNewSubcForm(${root.id},'${root.nombre}')">+ Subcategoría</button>
+        <button class="abtn" style="font-size:10px;padding:4px 8px;background:rgba(255,255,255,.08)" onclick="openEditCat(${root.id},'${root.nombre}','${root.emoji}','${root.color}')">✏️</button>
+        <button class="abtn red" style="font-size:10px;padding:4px 8px" onclick="deleteCat(${root.id})">🗑</button>
+      </div>
+      ${children.length?`<div style="margin-left:20px;display:flex;flex-wrap:wrap;gap:6px">
+        ${children.map(sc=>`<div style="display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:20px;background:rgba(255,255,255,.06);border:1px solid var(--glassBd)">
+          <span style="font-size:14px">${sc.emoji}</span>
+          <span style="font-size:12px;color:var(--cream-m);font-weight:600">${sc.nombre}</span>
+          <button onclick="openEditCat(${sc.id},'${sc.nombre}','${sc.emoji}','${sc.color}')" style="background:none;border:none;color:var(--gold);cursor:pointer;font-size:11px;padding:0">✏️</button>
+          <button onclick="deleteCat(${sc.id})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:11px;padding:0">✕</button>
+        </div>`).join('')}
+      </div>`:''}
+    </div>`;
+  }).join('');
+}
+
+async function saveNewCat(){
+  const nombre=(document.getElementById('nc-nombre').value||'').trim().toUpperCase();
+  const emoji=document.getElementById('nc-emoji').value||'📦';
+  const color=document.getElementById('nc-color').value||'#C9922A';
+  const padreId=document.getElementById('nc-padre').value||null;
+  if(!nombre){showToast('⚠️ Ingresa el nombre');return;}
+  const btn=document.getElementById('nc-save-btn');
+  if(btn){btn.disabled=true;btn.textContent='⏳ Guardando...';}
+  // Edge case: check duplicate
+  const dup=catsTree.find(c=>c.nombre===nombre&&((!c.padre_id&&!padreId)||(c.padre_id==padreId)));
+  if(dup){showToast('⚠️ Ya existe esa categoría');if(btn){btn.disabled=false;btn.textContent='Guardar'}return;}
+  const{data,error}=await db.from('categorias').insert({nombre,emoji,color,padre_id:padreId?parseInt(padreId):null}).select().single();
+  if(error){showToast('❌ '+error.message);if(btn){btn.disabled=false;btn.textContent='Guardar'}return;}
+  await db.from('cambios_log').insert({tabla:'categorias',operacion:'INSERT',datos:{nombre,padre_id:padreId}});
+  showToast('✅ '+nombre+' creada');
+  document.getElementById('nc-nombre').value='';
+  loadCategoriasTree();
+  if(btn){btn.disabled=false;btn.textContent='Guardar';}
+}
+
+function openNewSubcForm(padreId,padreNombre){
+  document.getElementById('nc-padre').value=padreId;
+  document.getElementById('nc-padre-label').textContent='→ dentro de '+padreNombre;
+  document.getElementById('nc-nombre').focus();
+}
+
+let editingCatId=null;
+function openEditCat(id,nombre,emoji,color){
+  editingCatId=id;
+  document.getElementById('ec-nombre').value=nombre;
+  document.getElementById('ec-emoji').value=emoji;
+  document.getElementById('ec-color').value=color;
+  document.getElementById('edit-cat-modal').style.display='flex';
+}
+async function saveEditCat(){
+  if(!editingCatId) return;
+  const nombre=(document.getElementById('ec-nombre').value||'').trim().toUpperCase();
+  const emoji=document.getElementById('ec-emoji').value||'📦';
+  const color=document.getElementById('ec-color').value||'#C9922A';
+  if(!nombre){showToast('⚠️ Ingresa el nombre');return;}
+  const{error}=await db.from('categorias').update({nombre,emoji,color}).eq('id',editingCatId);
+  if(error){showToast('❌ '+error.message);return;}
+  // Update inventario records with old name
+  const old=catsTree.find(c=>c.id===editingCatId);
+  if(old&&old.nombre!==nombre){
+    if(!old.padre_id){
+      await db.from('inventario').update({categoria:nombre}).eq('categoria',old.nombre);
+    } else {
+      await db.from('inventario').update({segmento:nombre}).eq('segmento',old.nombre);
+    }
+    // Reload products to reflect rename
+    const{data}=await db.from('inventario').select('*').eq('activo',true).order('categoria').order('segmento').order('nombre');
+    if(data){products=data.map(mapRow);adminProducts=data.map(mapRow);renderProducts(products);updateCatCounts();}
+  }
+  showToast('✅ Categoría actualizada');
+  closeEditModal();
+  loadCategoriasTree();
+}
+function closeEditModal(){document.getElementById('edit-cat-modal').style.display='none';editingCatId=null;}
+async function deleteCat(id){
+  const cat=catsTree.find(c=>c.id===id);
+  if(!cat) return;
+  const prodsInCat=adminProducts.filter(p=>p.cat===cat.nombre||p.subc===cat.nombre).length;
+  if(prodsInCat>0&&!confirm(`"${cat.nombre}" tiene ${prodsInCat} producto(s). Si la eliminas quedarán sin categoría. ¿Continuar?`)) return;
+  if(prodsInCat===0&&!confirm('¿Eliminar categoría "'+cat.nombre+'"?')) return;
+  const{error}=await db.from('categorias').update({activo:false}).eq('id',id);
+  if(error){showToast('❌ '+error.message);return;}
+  showToast('🗑️ Categoría eliminada');
+  loadCategoriasTree();
+}
+
+function secCategorias(){
+  const roots=catsTree.filter?catsTree.filter(c=>!c.padre_id):[];
+  return `<div class="panel-sec">
+    <h4>🗂️ Gestión de Categorías y Subcategorías</h4>
+
+    <!-- ÁRBOL DE CATEGORÍAS -->
+    <div id="cat-tree" style="margin-bottom:20px">
+      <div style="color:var(--cream-m);font-size:13px">Cargando árbol…</div>
+    </div>
+
+    <!-- FORM: NUEVA CATEGORÍA/SUBCATEGORÍA -->
+    <div style="background:rgba(255,255,255,.03);border:1px solid var(--glassBd);border-radius:10px;padding:14px">
+      <div style="font-weight:700;font-size:13px;color:var(--cream);margin-bottom:10px">➕ Nueva Categoría / Subcategoría</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="nc-nombre" class="ainp" placeholder="Nombre (ej: SNACKS)" style="flex:1;min-width:140px">
+        <input id="nc-emoji" class="ainp" placeholder="Emoji" style="width:60px;text-align:center">
+        <input id="nc-color" type="color" value="#C9922A" id="nc-color" style="width:40px;height:36px;border:none;background:none;cursor:pointer">
+        <select id="nc-padre" class="asel" style="min-width:160px">
+          <option value="">Categoría raíz</option>
+          ${roots.map(r=>`<option value="${r.id}">${r.emoji} ${r.nombre}</option>`).join('')}
+        </select>
+        <span id="nc-padre-label" style="font-size:11px;color:var(--gold)"></span>
+        <button id="nc-save-btn" class="abtn gold" onclick="saveNewCat()">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- EDIT MODAL -->
+  <div id="edit-cat-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;align-items:center;justify-content:center">
+    <div style="background:#1a1005;border:1px solid var(--glassBd);border-radius:14px;padding:24px;width:320px">
+      <h4 style="margin:0 0 16px;color:var(--cream)">✏️ Editar Categoría</h4>
+      <input id="ec-nombre" class="ainp" placeholder="Nombre" style="width:100%;margin-bottom:8px">
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        <input id="ec-emoji" class="ainp" placeholder="Emoji" style="width:60px;text-align:center">
+        <input id="ec-color" type="color" value="#C9922A" style="width:44px;height:36px;border:none;background:none;cursor:pointer">
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="abtn gold" style="flex:1" onclick="saveEditCat()">💾 Guardar</button>
+        <button class="abtn" style="background:rgba(255,255,255,.08)" onclick="closeEditModal()">Cancelar</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 function showSection(sec){
   document.querySelectorAll('.side-link').forEach(l=>l.classList.remove('active'));
   document.querySelector(`.side-link[onclick*="${sec}"]`)?.classList.add('active');
   const m=document.getElementById('adminMain');
-  const fns={dash:secDash,orders:secOrders,products:secProducts,stock:secStock,excel:secExcel,ventas:secVentas,pagos:secPagos};
+  const fns={dash:secDash,orders:secOrders,products:secProducts,categorias:secCategorias,stock:secStock,excel:secExcel,ventas:secVentas,pagos:secPagos};
   if(fns[sec]) m.innerHTML=fns[sec]();
   if(sec==='ventas') setTimeout(drawCharts,100);
+  if(sec==='products') setTimeout(()=>{buildCatOptions();renderPendingBar();},50);
+  if(sec==='categorias') setTimeout(()=>loadCategoriasTree(),50);
+  updatePendingBadge();
 }
 
 /* ---- ADMIN INVENTORY (editable in memory) ---- */
@@ -1335,9 +1597,91 @@ function changeOrderStatus(i,status){
 }
 
 /* ---- PRODUCTS MANAGEMENT ---- */
+let selectedProds=new Set();
+
+function toggleProd(id){
+  if(selectedProds.has(id)) selectedProds.delete(id); else selectedProds.add(id);
+  updateBulkBar();
+}
+function toggleAllProds(){
+  const fil=getFilteredAdmin();
+  if(selectedProds.size===fil.length) selectedProds.clear();
+  else fil.forEach(p=>selectedProds.add(p.id));
+  updateBulkBar();
+  showSection('products');
+}
+function getFilteredAdmin(){
+  const q=(document.getElementById('srchProd')?.value||'').toLowerCase();
+  const cat=document.getElementById('srchCat')?.value||'';
+  return adminProducts.filter(p=>(!q||p.name.toLowerCase().includes(q))&&(!cat||p.cat===cat));
+}
+function updateBulkBar(){
+  const bar=document.getElementById('bulk-bar');
+  const cnt=document.getElementById('bulk-count');
+  if(bar) bar.style.display=selectedProds.size>0?'flex':'none';
+  if(cnt) cnt.textContent=selectedProds.size+' seleccionado'+(selectedProds.size!==1?'s':'');
+}
+async function applyBulkMove(){
+  const newCat=document.getElementById('bulkCat').value;
+  const newSubc=document.getElementById('bulkSubc').value;
+  if(!newCat||!newSubc){showToast('⚠️ Selecciona categoría y subcategoría destino');return;}
+  if(selectedProds.size===0){showToast('⚠️ Selecciona al menos un producto');return;}
+  const btn=document.getElementById('bulk-apply-btn');
+  if(btn){btn.disabled=true;btn.textContent='⏳ Moviendo...';}
+  const ids=[...selectedProds];
+  // Edge case: validate target category exists
+  const catOK=adminProducts.some(p=>p.cat===newCat)||newCat.length>0;
+  if(!catOK){showToast('❌ Categoría destino inválida');if(btn){btn.disabled=false;btn.textContent='Mover ➜'}return;}
+  const{error}=await db.from('inventario')
+    .update({categoria:newCat,segmento:newSubc,updated_at:new Date().toISOString()})
+    .in('id',ids);
+  if(error){
+    showToast('❌ Error de red: '+error.message);
+    if(btn){btn.disabled=false;btn.textContent='Mover ➜'} return;
+  }
+  // Log the operation
+  await db.from('cambios_log').insert({tabla:'inventario',operacion:'BULK_MOVE',datos:{ids,de:'varios',a:newCat+'>'+newSubc}});
+  ids.forEach(id=>{
+    const p=products.find(x=>x.id===id); const a=adminProducts.find(x=>x.id===id);
+    if(p){p.cat=newCat;p.subc=newSubc;}if(a){a.cat=newCat;a.subc=newSubc;}
+  });
+  selectedProds.clear();
+  showToast('✅ '+ids.length+' producto(s) movidos a '+newCat+' › '+newSubc);
+  showSection('products');
+}
+function updateBulkSubc(){
+  const cat=document.getElementById('bulkCat').value;
+  const subcs=[...new Set(adminProducts.filter(p=>!cat||p.cat===cat).map(p=>p.subc))].sort();
+  const sel=document.getElementById('bulkSubc');
+  if(sel) sel.innerHTML=subcs.map(s=>`<option value="${s}">${s}</option>`).join('');
+}
+
 function secProducts(){
+  const allCats=[...new Set(adminProducts.map(p=>p.cat))].sort();
+  const allSubcs=[...new Set(adminProducts.map(p=>p.subc))].sort();
+  const n=Object.keys(pendingChanges).length;
   return `<div class="panel-sec">
-    <h4>🏷️ Gestión de Productos <span style="font-size:12px;color:var(--cream-m);font-weight:400">${adminProducts.length} artículos</span></h4>
+    <h4>🏷️ Gestión de Productos <span style="font-size:12px;color:var(--cream-m);font-weight:400">${adminProducts.length} artículos</span><span id="pending-badge" style="color:var(--gold);font-size:11px;margin-left:6px">${n>0?"("+n+" pend.)":""}</span></h4>
+
+    <div id="pending-bar" style="display:${n>0?'flex':'none'};align-items:center;gap:10px;padding:8px 12px;border-radius:8px;background:rgba(245,184,0,.12);border:1px solid rgba(245,184,0,.3);margin-bottom:12px;flex-wrap:wrap">
+      <span style="font-size:13px;color:var(--gold);font-weight:700">⏳ <span id="pending-count">${n} cambio${n!==1?'s':''} pendiente${n!==1?'s':''}</span></span>
+      <button id="save-all-btn" class="abtn gold" style="padding:6px 14px;font-size:12px" onclick="saveAllChanges()">💾 Guardar cambios</button>
+      <button class="abtn" style="padding:6px 10px;font-size:12px;background:rgba(255,255,255,.08)" onclick="discardAllChanges()">✕ Descartar</button>
+    </div>
+
+    <div id="bulk-bar" style="display:none;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:rgba(79,195,247,.1);border:1px solid rgba(79,195,247,.3);margin-bottom:12px;flex-wrap:wrap">
+      <span style="font-size:13px;color:#4FC3F7;font-weight:700">✔ <span id="bulk-count">0 seleccionados</span></span>
+      <span style="color:var(--cream-m);font-size:12px">Mover a →</span>
+      <select id="bulkCat" class="asel" style="font-size:12px;padding:4px 8px" onchange="updateBulkSubc()">
+        ${allCats.map(c=>`<option value="${c}">${c}</option>`).join('')}
+      </select>
+      <select id="bulkSubc" class="asel" style="font-size:12px;padding:4px 8px">
+        ${allSubcs.map(s=>`<option value="${s}">${s}</option>`).join('')}
+      </select>
+      <button id="bulk-apply-btn" class="abtn gold" style="padding:5px 12px;font-size:12px" onclick="applyBulkMove()">Mover ➜</button>
+      <button class="abtn" style="padding:5px 10px;font-size:12px;background:rgba(255,255,255,.08)" onclick="selectedProds.clear();updateBulkBar()">Cancelar</button>
+    </div>
+
     <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
       <input class="ainp" id="srchProd" placeholder="🔍 Buscar producto..." style="flex:1;min-width:200px;margin:0" oninput="filterAdminProducts()">
       <select class="asel" id="srchCat" style="width:160px;margin:0" onchange="filterAdminProducts()">
@@ -1347,7 +1691,7 @@ function secProducts(){
     </div>
     <div style="overflow-x:auto">
     <table class="atbl" id="prodTbl"><thead><tr>
-      <th>Producto</th><th>Categoría</th><th>Precio Venta</th><th>Costo</th><th>Stock</th><th>Oferta</th><th>Acciones</th>
+      <th style="width:28px"><input type="checkbox" onclick="toggleAllProds()" title="Sel. todos" style="accent-color:var(--gold)"></th><th>Producto</th><th>Categoría / Subc.</th><th>Precio Venta</th><th>Stock</th><th>Oferta</th><th>Acciones</th>
     </tr></thead><tbody id="prodTbody">
     ${renderAdminProdRows(adminProducts)}
     </tbody></table></div>
@@ -1378,15 +1722,28 @@ function secProducts(){
 }
 
 function renderAdminProdRows(list){
-  return list.map((p,i)=>`<tr>
+  const allSubcsMap={};
+  adminProducts.forEach(p=>{ if(!allSubcsMap[p.cat]) allSubcsMap[p.cat]=[]; if(!allSubcsMap[p.cat].includes(p.subc)) allSubcsMap[p.cat].push(p.subc); });
+  return list.map((p,i)=>{
+    const subcs=(allSubcsMap[p.cat]||[p.subc]).sort();
+    const globalIdx=adminProducts.findIndex(x=>x.id===p.id);
+    return `<tr style="${selectedProds.has(p.id)?'background:rgba(79,195,247,.07)':''}">
+    <td><input type="checkbox" ${selectedProds.has(p.id)?'checked':''} onchange="toggleProd(${p.id})" style="accent-color:var(--gold)"></td>
     <td><span style="font-size:16px">${p.icon}</span> <span class="tn">${p.name}</span><br><span style="font-size:9px;color:var(--cream-m)">${p.qty}</span></td>
-    <td><span class="tbadge ok">${p.cat}</span><br><span style="font-size:9px;color:var(--cream-m)">${p.subc}</span></td>
-    <td><input style="width:70px;background:transparent;border:1px solid var(--glassBd);border-radius:6px;padding:3px 6px;color:var(--gold-lt);font-family:'Outfit',sans-serif;font-size:13px;font-weight:700" value="${p.price.toFixed(2)}" onchange="updateProd(${i},'price',this.value)"></td>
-    <td style="font-size:11px;color:var(--cream-m)">S/ ${p.cost.toFixed(2)}</td>
-    <td><input style="width:60px;background:transparent;border:1px solid ${p.stock===0?'rgba(229,57,53,.5)':'var(--glassBd)'};border-radius:6px;padding:3px 6px;color:${p.stock===0?'#EF5350':'var(--cream)'};font-family:'Outfit',sans-serif;font-size:13px;font-weight:700;text-align:center" value="${p.stock}" onchange="updateProd(${i},'stock',this.value)"></td>
-    <td><label style="cursor:pointer"><input type="checkbox" ${p.oferta?'checked':''} onchange="updateProd(${i},'oferta',this.checked)" style="accent-color:var(--gold)"> Oferta</label></td>
-    <td><button class="abtn red" style="font-size:10px;padding:4px 8px" onclick="delProduct(${i})">🗑</button></td>
-  </tr>`).join('');
+    <td>
+      <select style="background:transparent;border:1px solid var(--glassBd);border-radius:5px;padding:2px 5px;color:var(--gold-lt);font-size:11px;font-family:'Outfit',sans-serif;margin-bottom:3px;display:block" onchange="updateProd(${globalIdx},'cat',this.value)">
+        ${[...new Set(adminProducts.map(x=>x.cat))].sort().map(c=>`<option value="${c}" ${c===p.cat?'selected':''}>${c}</option>`).join('')}
+      </select>
+      <select style="background:transparent;border:1px solid var(--glassBd);border-radius:5px;padding:2px 5px;color:var(--cream-m);font-size:10px;font-family:'Outfit',sans-serif;display:block" onchange="updateProd(${globalIdx},'subc',this.value)">
+        ${subcs.map(s=>`<option value="${s}" ${s===p.subc?'selected':''}>${s}</option>`).join('')}
+      </select>
+    </td>
+    <td><input style="width:70px;background:transparent;border:1px solid var(--glassBd);border-radius:6px;padding:3px 6px;color:var(--gold-lt);font-family:'Outfit',sans-serif;font-size:13px;font-weight:700" value="${p.price.toFixed(2)}" onchange="updateProd(${globalIdx},'price',this.value)"></td>
+    <td><input style="width:55px;background:transparent;border:1px solid ${p.stock===0?'rgba(229,57,53,.5)':'var(--glassBd)'};border-radius:6px;padding:3px 6px;color:${p.stock===0?'#EF5350':'var(--cream)'};font-family:'Outfit',sans-serif;font-size:13px;font-weight:700;text-align:center" value="${p.stock}" onchange="updateProd(${globalIdx},'stock',this.value)"></td>
+    <td><label style="cursor:pointer"><input type="checkbox" ${p.oferta?'checked':''} onchange="updateProd(${globalIdx},'oferta',this.checked)" style="accent-color:var(--gold)"> Oferta</label></td>
+    <td><button class="abtn red" style="font-size:10px;padding:4px 8px" onclick="delProduct(${globalIdx})">🗑</button></td>
+  </tr>`;
+  }).join('');
 }
 
 function filterAdminProducts(){
@@ -1396,19 +1753,13 @@ function filterAdminProducts(){
   document.getElementById('prodTbody').innerHTML=renderAdminProdRows(fil);
 }
 
-async function updateProd(i,field,val){
+function updateProd(i,field,val){
   if(field==='price'||field==='cost'||field==='stock') adminProducts[i][field]=parseFloat(val)||0;
   else adminProducts[i][field]=val;
   const pub=products.find(p=>p.id===adminProducts[i].id);
   if(pub) pub[field]=adminProducts[i][field];
-  // ── Sync to Supabase ──
-  const FM={price:'precio',stock:'stock',name:'nombre',cat:'categoria',subc:'segmento',icon:'emoji',qty:'descripcion',oferta:'oferta'};
-  const col=FM[field];
-  if(col){
-    const{error}=await db.from('inventario').update({[col]:adminProducts[i][field],updated_at:new Date().toISOString()}).eq('id',adminProducts[i].id);
-    if(error){console.error(error);showToast('❌ Error al guardar en BD');}
-    else{showToast('✅ '+field+' guardado en base de datos');renderProducts(products);}
-  }
+  // Queue for batch save
+  queueChange(adminProducts[i].id, field, adminProducts[i][field]);
 }
 
 async function addProduct(){
