@@ -7,6 +7,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
 <script>
 /* ============================================================
    SUPABASE CLIENT — Los Renacos
@@ -41,6 +43,7 @@ async function loadProducts(){
     updateHeroStats();
     updateCatCounts();
     initRealtime();
+    setTimeout(initFuse,200);
   }catch(e){
     console.error('Supabase error:',e);
     showToast('⚠️ Error de conexión — recarga la página');
@@ -905,6 +908,7 @@ footer::before { content:''; position:absolute; top:0; left:0; right:0; height:2
         <div class="side-link" onclick="showSection('categorias')"><span class="sl-i">🗂️</span> Categorías</div>
         <div class="side-link" onclick="showSection('stock')"><span class="sl-i">📉</span> Alertas de Stock</div>
         <div class="side-link" onclick="showSection('excel')"><span class="sl-i">📊</span> Carga por Excel</div>
+        <div class="side-link" onclick="showSection('historial')"><span class="sl-i">📜</span> Historial cambios</div>
         <div id="rt-status" style="margin:8px 14px 0;padding:5px 10px;border-radius:20px;font-size:10px;font-weight:700;font-family:Outfit,sans-serif;background:rgba(255,255,255,.07);color:var(--cream-m);display:flex;align-items:center;gap:6px">
           <span id="rt-dot" style="width:7px;height:7px;border-radius:50%;background:#555;display:inline-block"></span>
           <span id="rt-label">Conectando…</span>
@@ -1515,15 +1519,66 @@ function secCategorias(){
   </div>`;
 }
 
+
+/* ════════════════════════════════════════════
+   HISTORIAL DE CAMBIOS
+   ════════════════════════════════════════════ */
+async function loadHistorial(){
+  const container=document.getElementById('historial-list');
+  if(!container) return;
+  container.innerHTML='<div style="color:var(--cream-m);font-size:13px;padding:20px 0">⏳ Cargando historial…</div>';
+  const{data,error}=await db.from('cambios_log')
+    .select('*').order('created_at',{ascending:false}).limit(100);
+  if(error){container.innerHTML='<div style="color:var(--red)">❌ '+error.message+'</div>';return;}
+  if(!data||!data.length){container.innerHTML='<div style="color:var(--cream-m);font-size:13px;padding:20px 0">Sin registros todavía.</div>';return;}
+  const opColor={BATCH_SAVE:'#4CAF74',BULK_MOVE:'#4FC3F7',EXCEL_IMPORT:'#A29BFE',EXCEL_EXPORT:'#F5B800',INSERT:'#55EFC4',TEST_VALIDATION:'#888',default:'#C9922A'};
+  container.innerHTML=data.map(r=>{
+    const d=new Date(r.created_at);
+    const fecha=d.toLocaleDateString('es-PE',{day:'2-digit',month:'short'});
+    const hora=d.toLocaleTimeString('es-PE',{hour:'2-digit',minute:'2-digit'});
+    const color=opColor[r.operacion]||opColor.default;
+    const det=typeof r.datos==='object'?Object.entries(r.datos||{}).map(([k,v])=>`<span style="color:var(--cream-m)">${k}:</span> <strong style="color:var(--cream)">${JSON.stringify(v).replace(/["{]/g,'').replace(/}/g,'')}</strong>`).join(' · '):'';
+    return `<div style="display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.05)">
+      <div style="flex-shrink:0;text-align:center;min-width:44px">
+        <div style="font-size:10px;font-weight:700;color:var(--cream-m)">${fecha}</div>
+        <div style="font-size:9px;color:var(--cream-m);opacity:.6">${hora}</div>
+      </div>
+      <div style="width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;margin-top:4px"></div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+          <span style="font-size:11px;font-weight:800;font-family:Outfit,sans-serif;color:${color};letter-spacing:.5px">${r.operacion}</span>
+          <span style="font-size:10px;color:var(--cream-m);background:rgba(255,255,255,.06);padding:1px 7px;border-radius:10px">${r.tabla}</span>
+          <span style="font-size:10px;color:var(--cream-m)">${r.usuario||'admin'}</span>
+        </div>
+        ${det?`<div style="font-size:11px;line-height:1.6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${det}</div>`:''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function secHistorial(){
+  return `<div class="panel-sec">
+    <h4>📜 Historial de cambios</h4>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <span style="font-size:12px;color:var(--cream-m)">Últimas 100 operaciones en base de datos</span>
+      <button class="abtn" style="font-size:11px;padding:5px 12px;background:rgba(255,255,255,.07)" onclick="loadHistorial()">↻ Actualizar</button>
+    </div>
+    <div id="historial-list">
+      <div style="color:var(--cream-m);font-size:13px">Cargando…</div>
+    </div>
+  </div>`;
+}
+
 function showSection(sec){
   document.querySelectorAll('.side-link').forEach(l=>l.classList.remove('active'));
   document.querySelector(`.side-link[onclick*="${sec}"]`)?.classList.add('active');
   const m=document.getElementById('adminMain');
-  const fns={dash:secDash,orders:secOrders,products:secProducts,categorias:secCategorias,stock:secStock,excel:secExcel,ventas:secVentas,pagos:secPagos};
+  const fns={dash:secDash,orders:secOrders,products:secProducts,categorias:secCategorias,stock:secStock,excel:secExcel,ventas:secVentas,pagos:secPagos,historial:secHistorial};
   if(fns[sec]) m.innerHTML=fns[sec]();
   if(sec==='ventas') setTimeout(drawCharts,100);
   if(sec==='products') setTimeout(()=>{buildCatOptions();renderPendingBar();},50);
   if(sec==='categorias') setTimeout(()=>loadCategoriasTree(),50);
+  if(sec==='historial') setTimeout(()=>loadHistorial(),50);
   updatePendingBadge();
 }
 
@@ -1598,6 +1653,62 @@ function changeOrderStatus(i,status){
 
 /* ---- PRODUCTS MANAGEMENT ---- */
 let selectedProds=new Set();
+let currentPage=1;
+const PAGE_SIZE=50;
+let fuseInstance=null;
+let lastFilteredList=[];
+
+function initFuse(){
+  if(!window.Fuse||!adminProducts.length) return;
+  fuseInstance=new Fuse(adminProducts,{
+    keys:['name','cat','subc','qty'],
+    threshold:0.35,
+    includeScore:true,
+    minMatchCharLength:2
+  });
+}
+
+function getFilteredAdmin(q,cat){
+  if(!q&&!cat) return adminProducts;
+  let list=adminProducts;
+  if(cat) list=list.filter(p=>p.cat===cat);
+  if(!q) return list;
+  if(fuseInstance&&!cat){
+    return fuseInstance.search(q).map(r=>r.item).filter(p=>!cat||p.cat===cat);
+  }
+  return list.filter(p=>p.name.toLowerCase().includes(q.toLowerCase())||p.subc.toLowerCase().includes(q.toLowerCase()));
+}
+
+function getPaginatedRows(list){
+  const start=(currentPage-1)*PAGE_SIZE;
+  return list.slice(start,start+PAGE_SIZE);
+}
+
+function renderPagination(total){
+  const el=document.getElementById('prod-pagination');
+  if(!el) return;
+  const pages=Math.ceil(total/PAGE_SIZE);
+  if(pages<=1){el.innerHTML='';return;}
+  const start=(currentPage-1)*PAGE_SIZE+1;
+  const end=Math.min(currentPage*PAGE_SIZE,total);
+  el.innerHTML=`
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 0;flex-wrap:wrap">
+      <span style="font-size:12px;color:var(--cream-m)">${start}–${end} de ${total} productos</span>
+      <button class="abtn" style="padding:4px 10px;font-size:12px;${currentPage===1?'opacity:.4;pointer-events:none':''}" onclick="changePage(${currentPage-1})">← Ant.</button>
+      ${Array.from({length:Math.min(pages,7)},(_,i)=>{
+        const pg=pages<=7?i+1:(currentPage<=4?i+1:currentPage-3+i);
+        if(pg<1||pg>pages) return '';
+        return `<button class="abtn${pg===currentPage?' gold':''}" style="padding:4px 9px;font-size:12px;min-width:30px" onclick="changePage(${pg})">${pg}</button>`;
+      }).join('')}
+      <button class="abtn" style="padding:4px 10px;font-size:12px;${currentPage===pages?'opacity:.4;pointer-events:none':''}" onclick="changePage(${currentPage+1})">Sig. →</button>
+      <span style="font-size:12px;color:var(--cream-m)">Página ${currentPage}/${pages}</span>
+    </div>`;
+}
+
+function changePage(pg){
+  currentPage=pg;
+  filterAdminProducts();
+}
 
 function toggleProd(id){
   if(selectedProds.has(id)) selectedProds.delete(id); else selectedProds.add(id);
@@ -1661,7 +1772,7 @@ function secProducts(){
   const allSubcs=[...new Set(adminProducts.map(p=>p.subc))].sort();
   const n=Object.keys(pendingChanges).length;
   return `<div class="panel-sec">
-    <h4>🏷️ Gestión de Productos <span style="font-size:12px;color:var(--cream-m);font-weight:400">${adminProducts.length} artículos</span><span id="pending-badge" style="color:var(--gold);font-size:11px;margin-left:6px">${n>0?"("+n+" pend.)":""}</span></h4>
+    <h4>🏷️ Gestión de Productos <span style="font-size:12px;color:var(--cream-m);font-weight:400"><span id="prod-info">${adminProducts.length} artículos</span></span><span id="pending-badge" style="color:var(--gold);font-size:11px;margin-left:6px">${n>0?"("+n+" pend.)":""}</span></h4>
 
     <div id="pending-bar" style="display:${n>0?'flex':'none'};align-items:center;gap:10px;padding:8px 12px;border-radius:8px;background:rgba(245,184,0,.12);border:1px solid rgba(245,184,0,.3);margin-bottom:12px;flex-wrap:wrap">
       <span style="font-size:13px;color:var(--gold);font-weight:700">⏳ <span id="pending-count">${n} cambio${n!==1?'s':''} pendiente${n!==1?'s':''}</span></span>
@@ -1695,6 +1806,7 @@ function secProducts(){
     </tr></thead><tbody id="prodTbody">
     ${renderAdminProdRows(adminProducts)}
     </tbody></table></div>
+    <div id="prod-pagination"></div>
   </div>
   <div class="panel-sec">
     <h4>➕ Agregar Producto</h4>
@@ -1747,10 +1859,15 @@ function renderAdminProdRows(list){
 }
 
 function filterAdminProducts(){
-  const q=document.getElementById('srchProd').value.toLowerCase();
-  const cat=document.getElementById('srchCat').value;
-  const fil=adminProducts.filter(p=>(!q||p.name.toLowerCase().includes(q))&&(!cat||p.cat===cat));
-  document.getElementById('prodTbody').innerHTML=renderAdminProdRows(fil);
+  const q=(document.getElementById('srchProd')?.value||'').trim();
+  const cat=document.getElementById('srchCat')?.value||'';
+  lastFilteredList=getFilteredAdmin(q,cat);
+  const pageRows=getPaginatedRows(lastFilteredList);
+  const tbody=document.getElementById('prodTbody');
+  if(tbody) tbody.innerHTML=renderAdminProdRows(pageRows);
+  renderPagination(lastFilteredList.length);
+  const info=document.getElementById('prod-info');
+  if(info) info.textContent=`${lastFilteredList.length} producto${lastFilteredList.length!==1?'s':''}${q?' encontrado'+( lastFilteredList.length!==1?'s':''):''}`;
 }
 
 function updateProd(i,field,val){
@@ -1851,42 +1968,95 @@ async function restockProduct(id){
 /* ---- EXCEL UPLOAD ---- */
 function secExcel(){
   return `<div class="panel-sec">
-    <h4>📊 Carga Masiva por Excel</h4>
-    <div class="alert-bar warn">💡 El archivo Excel debe seguir la estructura de columnas definida abajo.</div>
-    <div class="upload-box" onclick="document.getElementById('xlsxInput').click()" style="margin-bottom:16px">
+    <h4>⬇️ Exportar Inventario a Excel</h4>
+    <p style="font-size:12px;color:var(--cream-m);margin-bottom:14px">${adminProducts.length} productos listos para exportar. El archivo descargado incluye todas las columnas y puede reimportarse.</p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="abtn gold" onclick="exportXLSX()">📥 Exportar inventario .xlsx</button>
+      <button class="abtn" style="background:rgba(255,255,255,.07)" onclick="exportCSV()">📄 Exportar CSV</button>
+    </div>
+    <div id="export-result" style="margin-top:10px"></div>
+  </div>
+  <div class="panel-sec">
+    <h4>📊 Importar Excel al inventario</h4>
+    <div class="alert-bar warn">💡 Columnas requeridas: NOMBRE · CATEGORIA · SUBCATEGORIA · PRECIO_VENTA · STOCK · EMOJI · PRESENTACION</div>
+    <div class="upload-box" onclick="document.getElementById('xlsxInput').click()" style="margin:12px 0">
       <span class="ub-icon">📊</span>
-      <div class="ub-text">Toca para subir archivo Excel (.xlsx)</div>
-      <div class="ub-sub">Estructura: ID · CATEGORIA · SUBCATEGORIA · NOMBRE · PRECIO_COMPRA · UNIDADES · PRECIO_VENTA · STOCK · OFERTA</div>
+      <div class="ub-text">Toca para subir archivo Excel (.xlsx / .xlsm)</div>
+      <div class="ub-sub">UPSERT automático: actualiza existentes, inserta nuevos</div>
     </div>
     <input type="file" id="xlsxInput" accept=".xlsx,.xls,.xlsm" style="display:none" onchange="handleXlsx(this)">
     <div id="xlsxResult"></div>
-  </div>
-  <div class="panel-sec">
-    <h4>📋 Estructura del Excel requerida</h4>
-    <div style="overflow-x:auto">
-    <table class="atbl"><thead><tr>
-      <th>Columna A</th><th>Columna B</th><th>Columna C</th><th>Columna D</th><th>Columna E</th><th>Columna F</th><th>Columna G</th><th>Columna H</th><th>Columna I</th><th>Columna J</th>
-    </tr></thead><tbody><tr>
-      <td class="tn">ID</td><td>CATEGORIA</td><td>SUBCATEGORIA</td><td>NOMBRE_PRODUCTO</td><td>PRECIO_COMPRA</td><td>UNIDADES_KG</td><td>PRECIO_VENTA</td><td>STOCK</td><td>OFERTA (SI/NO)</td><td>ICONO_EMOJI</td>
-    </tr><tr style="font-size:11px;color:var(--cream-m)">
-      <td>P001</td><td>BODEGA</td><td>COCINA</td><td>Arroz Extra 1kg</td><td>3.50</td><td>1 Kg</td><td>5.00</td><td>20</td><td>NO</td><td>🍚</td>
-    </tr></tbody></table></div>
-    <p style="font-size:11px;color:var(--cream-m);margin-top:12px;line-height:1.6">
-      💡 <strong style="color:var(--gold-lt)">Tip:</strong> La primera fila debe ser el encabezado. Los precios van sin el símbolo S/. El campo OFERTA acepta SI/NO o 1/0. Si el ID ya existe, se actualizará; si no existe, se creará nuevo.
-    </p>
-  </div>
-  <div class="panel-sec">
-    <h4>⬇️ Exportar Inventario Actual</h4>
-    <p style="font-size:12px;color:var(--cream-m);margin-bottom:12px">Descarga el inventario actual en formato CSV para abrirlo en Excel.</p>
-    <button class="abtn gold" onclick="exportCSV()">📥 Descargar Inventario CSV</button>
   </div>`;
 }
 
-function handleXlsx(inp){
+async function handleXlsx(inp){
   const f=inp.files[0];
   if(!f) return;
-  document.getElementById('xlsxResult').innerHTML=`<div class="alert-bar warn">⚙️ Procesando "${f.name}"... En producción, este módulo usa la librería <strong>SheetJS (xlsx)</strong> para parsear el Excel y actualizar el inventario automáticamente.</div>
-  <p style="font-size:12px;color:var(--cream-m);margin-top:10px">Para activar la carga real, integra el script: <code style="background:rgba(255,255,255,.05);padding:2px 6px;border-radius:4px;font-size:11px">import * as XLSX from 'xlsx'</code> y usa <code style="background:rgba(255,255,255,.05);padding:2px 6px;border-radius:4px;font-size:11px">XLSX.read()</code> para parsear el buffer.</p>`;
+  const res=document.getElementById('xlsxResult');
+  res.innerHTML='<div class="alert-bar warn">⚙️ Leyendo '+f.name+'…</div>';
+  try{
+    const buf=await f.arrayBuffer();
+    const wb=XLSX.read(buf,{type:'array'});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const rows=XLSX.utils.sheet_to_json(ws,{defval:''});
+    if(!rows.length){res.innerHTML='<div class="alert-bar red">❌ Sin datos en el Excel</div>';return;}
+    const COL={NOMBRE:['NOMBRE','NOMBRE_PRODUCTO','PRODUCTO','name'],
+               CATEGORIA:['CATEGORIA','CATEGORY','cat'],
+               SEGMENTO:['SUBCATEGORIA','SEGMENTO','SUBC','subc'],
+               PRECIO:['PRECIO_VENTA','PRECIO','PRICE','price'],
+               STOCK:['STOCK','stock'],EMOJI:['EMOJI','ICONO','icon'],
+               DESC:['PRESENTACION','CANTIDAD','qty','DESC']};
+    const getCol=(row,keys)=>{for(const k of keys){if(row[k]!==undefined&&row[k]!=='') return row[k];}return '';};
+    let ok=0,skip=0,errors=[];
+    res.innerHTML='<div class="alert-bar warn">⏳ Procesando '+rows.length+' filas…</div>';
+    for(const row of rows){
+      const nombre=(getCol(row,COL.NOMBRE)||'').toString().trim();
+      if(!nombre){skip++;continue;}
+      const upsertRow={nombre,categoria:(getCol(row,COL.CATEGORIA)||'BODEGA').toString().toUpperCase(),segmento:(getCol(row,COL.SEGMENTO)||'VARIOS').toString().toUpperCase(),precio:parseFloat(getCol(row,COL.PRECIO))||0,stock:parseInt(getCol(row,COL.STOCK))||0,emoji:getCol(row,COL.EMOJI)||'📦',descripcion:getCol(row,COL.DESC)||'Unidad',activo:true,updated_at:new Date().toISOString()};
+      const{error}=await db.from('inventario').upsert(upsertRow,{onConflict:'nombre'});
+      if(error){errors.push(nombre+': '+error.message);}else{ok++;}
+    }
+    await db.from('cambios_log').insert({tabla:'inventario',operacion:'EXCEL_IMPORT',datos:{archivo:f.name,procesadas:rows.length,ok,skip,errors:errors.length}});
+    const msg=errors.length?'⚠️ '+ok+' OK, '+errors.length+' errores':'✅ '+ok+' productos importados correctamente';
+    res.innerHTML='<div class="alert-bar '+(errors.length?'warn':'ok')+'">'+msg+'</div>'+(errors.length?'<div style="font-size:11px;color:var(--cream-m);margin-top:8px">'+errors.slice(0,5).join('<br>')+(errors.length>5?'<br>…y '+(errors.length-5)+' más':'')+'</div>':'');
+    if(ok>0){await loadProducts();showToast('✅ Inventario actualizado desde Excel');}
+  }catch(e){res.innerHTML='<div class="alert-bar red">❌ Error: '+e.message+'</div>';}
+}
+
+function exportXLSX(){
+  if(!window.XLSX){showToast('⚠️ SheetJS no cargado todavía, espera un momento');return;}
+  const btn=event?.target;
+  if(btn){btn.disabled=true;btn.textContent='⏳ Generando...';}
+  try{
+    const data=[['ID','CATEGORIA','SUBCATEGORIA','NOMBRE','PRECIO_COMPRA','PRECIO_VENTA','STOCK','OFERTA','PRESENTACION','EMOJI']];
+    adminProducts.forEach(p=>data.push([p.id,p.cat,p.subc,p.name,p.cost.toFixed(2),p.price.toFixed(2),p.stock,p.oferta?'SI':'NO',p.qty,p.icon]));
+    const ws=XLSX.utils.aoa_to_sheet(data);
+    ws['!cols']=[{wch:6},{wch:12},{wch:16},{wch:40},{wch:12},{wch:12},{wch:8},{wch:8},{wch:16},{wch:6}];
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,'Inventario');
+    const date=new Date().toISOString().slice(0,10);
+    XLSX.writeFile(wb,'LosRenacos_Inventario_'+date+'.xlsx');
+    showToast('✅ Descargando inventario Excel');
+    db.from('cambios_log').insert({tabla:'inventario',operacion:'EXCEL_EXPORT',datos:{productos:adminProducts.length,fecha:date}});
+  }catch(e){showToast('❌ Error: '+e.message);}
+  finally{if(btn){btn.disabled=false;btn.textContent='📥 Exportar inventario .xlsx';}}
+}
+
+
+function exportXLSX(){
+  if(!window.XLSX){showToast('⚠️ Cargando librería, intenta en 2 seg.');return;}
+  try{
+    const data=[['ID','CATEGORIA','SUBCATEGORIA','NOMBRE','PRECIO_COMPRA','PRECIO_VENTA','STOCK','OFERTA','PRESENTACION','EMOJI']];
+    adminProducts.forEach(p=>data.push([p.id,p.cat,p.subc,p.name,p.cost.toFixed(2),p.price.toFixed(2),p.stock,p.oferta?'SI':'NO',p.qty,p.icon]));
+    const ws=XLSX.utils.aoa_to_sheet(data);
+    ws['!cols']=[{wch:6},{wch:12},{wch:16},{wch:40},{wch:12},{wch:12},{wch:8},{wch:8},{wch:16},{wch:6}];
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,'Inventario');
+    const date=new Date().toISOString().slice(0,10);
+    XLSX.writeFile(wb,'LosRenacos_Inventario_'+date+'.xlsx');
+    showToast('✅ Excel descargado: '+adminProducts.length+' productos');
+    db.from('cambios_log').insert({tabla:'inventario',operacion:'EXCEL_EXPORT',datos:{productos:adminProducts.length,fecha:date}});
+  }catch(e){showToast('❌ '+e.message);}
 }
 
 function exportCSV(){
